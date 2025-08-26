@@ -27,4 +27,4 @@ similarity_threshold: 0.7   # BTC similarity coefficient
 rough_dis_threshold: 0.01   # Threshold coefficient for BTC edge length distance
 normal_threshold: 0.2  # Threshold for plane ICP and geometric validation: point-to-plane distance
 dis_threshold: 0.5  # Distance threshold for point-to-plane validation
-icp_threshold: 0.2  # Threshold for plane-to-plane ICP to triggle loop.
+icp_threshold: 0.2  # Threshold for plane-to-plane ICP to trigger loop.
