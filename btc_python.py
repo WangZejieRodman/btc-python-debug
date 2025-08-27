@@ -182,7 +182,7 @@ class BTCDescManager:
         voxel_map = {}
 
         for point in points:
-            # Calculate voxel coordinates
+            # Calculate voxel coordinates (matching C++ logic exactly)
             voxel_coords = np.floor(point[:3] / voxel_size).astype(int)
             voxel_key = tuple(voxel_coords)
 
@@ -205,18 +205,25 @@ class BTCDescManager:
         voxel_map = {}
 
         for point in input_cloud:
-            # Calculate voxel coordinates
+            # Calculate voxel coordinates (exact C++ logic)
             loc_xyz = point[:3] / self.config_setting.voxel_size
-            loc_xyz = np.floor(loc_xyz).astype(int)
-            voxel_key = tuple(loc_xyz)
+            # C++ logic: if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
+            for j in range(3):
+                if loc_xyz[j] < 0:
+                    loc_xyz[j] -= 1.0
+
+            voxel_coords = np.floor(loc_xyz).astype(np.int64)
+            voxel_key = tuple(voxel_coords)
 
             if voxel_key not in voxel_map:
                 voxel_map[voxel_key] = {'points': [], 'plane': None}
 
             voxel_map[voxel_key]['points'].append(point[:3])
 
-        # Initialize planes for each voxel
-        for voxel_key, voxel_data in voxel_map.items():
+        # Initialize planes for each voxel with consistent ordering
+        sorted_keys = sorted(voxel_map.keys())
+        for voxel_key in sorted_keys:
+            voxel_data = voxel_map[voxel_key]
             if len(voxel_data['points']) >= self.config_setting.voxel_init_num:
                 plane = self.init_plane(np.array(voxel_data['points']))
                 voxel_data['plane'] = plane
@@ -228,15 +235,20 @@ class BTCDescManager:
         if len(voxel_points) < self.config_setting.voxel_init_num:
             return None
 
-        # Calculate covariance matrix
+        # Calculate center
         center = np.mean(voxel_points, axis=0)
-        centered_points = voxel_points - center
-        covariance = np.dot(centered_points.T, centered_points) / len(voxel_points)
+
+        # Calculate covariance matrix (exact C++ logic)
+        covariance = np.zeros((3, 3))
+        for point in voxel_points:
+            covariance += np.outer(point, point)
+
+        covariance = covariance / len(voxel_points) - np.outer(center, center)
 
         # Eigenvalue decomposition
         eigenvalues, eigenvectors = np.linalg.eigh(covariance)
 
-        # Sort eigenvalues and eigenvectors
+        # Sort eigenvalues and eigenvectors (ascending order)
         idx = np.argsort(eigenvalues)
         eigenvalues = eigenvalues[idx]
         eigenvectors = eigenvectors[:, idx]
@@ -281,16 +293,16 @@ class BTCDescManager:
         if not origin_list:
             return []
 
-        # Merge similar planes
+        # Merge similar planes (exact C++ logic)
         merged_planes = self.merge_planes(origin_list)
 
-        # Sort by points size
+        # Sort by points size (largest first)
         merged_planes.sort(key=lambda x: x.points_size, reverse=True)
 
         return merged_planes
 
     def merge_planes(self, origin_list: List[Plane]) -> List[Plane]:
-        """Merge similar planes"""
+        """Merge similar planes with exact C++ logic"""
         if len(origin_list) <= 1:
             return origin_list
 
@@ -300,7 +312,7 @@ class BTCDescManager:
 
         current_id = 1
 
-        # Merge similar planes
+        # C++ reverse iteration logic
         for i in range(len(origin_list) - 1, 0, -1):
             for j in range(i):
                 plane1, plane2 = origin_list[i], origin_list[j]
@@ -352,7 +364,7 @@ class BTCDescManager:
         # Weighted center
         weighted_center = sum(p.center * p.points_size for p in planes) / total_points
 
-        # Merge covariances
+        # Merge covariances (exact C++ logic)
         merged_covariance = np.zeros((3, 3))
         for p in planes:
             P_PT = (p.covariance + np.outer(p.center, p.center)) * p.points_size
@@ -384,23 +396,31 @@ class BTCDescManager:
         return 2 * common_bits / (b1.summary + b2.summary) if (b1.summary + b2.summary) > 0 else 0
 
     def extract_binary_descriptors(self, proj_planes: List[Plane], input_cloud: np.ndarray) -> List[BinaryDescriptor]:
-        """Extract binary descriptors from projection planes"""
+        """
+        Extract binary descriptors with EXACT C++ logic
+        This is the key function that was causing the major differences
+        """
         binary_list = []
-        last_normal = np.zeros(3)
+        last_normal = np.zeros(3)  # C++ uses this to track previous normal
         useful_proj_num = 0
 
-        for plane in proj_planes:
+        # C++ logic: iterate through sorted projection planes
+        for i, plane in enumerate(proj_planes):
             proj_center = plane.center
             proj_normal = plane.normal
 
+            # C++ logic: ensure normal points upward (positive Z)
             if proj_normal[2] < 0:
                 proj_normal = -proj_normal
 
+            # C++ key filtering logic: check normal difference with last used normal
             normal_diff = np.linalg.norm(proj_normal - last_normal)
             normal_add = np.linalg.norm(proj_normal + last_normal)
 
+            # C++ condition for accepting this projection plane
             if normal_diff < 0.3 or normal_add > 0.3:
-                last_normal = proj_normal
+                last_normal = proj_normal.copy()
+
                 if self.print_debug_info:
                     print(f"[Description] reference plane normal: {proj_normal}, center: {proj_center}")
 
@@ -408,13 +428,14 @@ class BTCDescManager:
                 temp_binary_list = self.extract_binary_from_plane(proj_center, proj_normal, input_cloud)
                 binary_list.extend(temp_binary_list)
 
+                # C++ logic: stop when we have enough projection planes
                 if useful_proj_num >= self.config_setting.proj_plane_num:
                     break
 
         # Non-maximum suppression
         binary_list = self.non_max_suppression(binary_list)
 
-        # Keep only the best corners
+        # Keep only the best corners (sorted by summary)
         if len(binary_list) > self.config_setting.useful_corner_num:
             binary_list.sort(key=lambda x: x.summary, reverse=True)
             binary_list = binary_list[:self.config_setting.useful_corner_num]
@@ -434,23 +455,32 @@ class BTCDescManager:
         A, B, C = proj_normal
         D = -np.dot(proj_normal, proj_center)
 
-        # Create coordinate system
-        x_axis = np.array([1, 0, 0])
+        # Create coordinate system (exact C++ logic)
+        x_axis = np.array([1.0, 0.0, 0.0])
         if C != 0:
             x_axis[2] = -(A + B) / C
         elif B != 0:
             x_axis[1] = -A / B
         else:
-            x_axis = np.array([0, 1, 0])
+            x_axis = np.array([0.0, 1.0, 0.0])
 
         x_axis = x_axis / np.linalg.norm(x_axis)
         y_axis = np.cross(proj_normal, x_axis)
         y_axis = y_axis / np.linalg.norm(y_axis)
 
+        # DEBUG: 投影坐标系
+        print(f"[DEBUG] Projection coordinate system:")
+        print(f"  proj_normal: {proj_normal}")
+        print(f"  proj_center: {proj_center}")
+        print(f"  x_axis: {x_axis}")
+        print(f"  y_axis: {y_axis}")
+        print(f"  A,B,C,D: {A}, {B}, {C}, {D}")
+
         # Project points
         point_list_2d = []
         dis_list = []
 
+        debug_count = 0
         for point in input_cloud:
             x, y, z = point[:3]
             dis = x * A + y * B + z * C + D
@@ -459,12 +489,18 @@ class BTCDescManager:
                 # Project point onto plane
                 proj_point = np.array([x, y, z]) - dis * proj_normal
 
-                # Convert to 2D coordinates
+                # Convert to 2D coordinates (C++ uses different variable names but same logic)
                 project_x = np.dot(proj_point - proj_center, y_axis)
                 project_y = np.dot(proj_point - proj_center, x_axis)
 
                 point_list_2d.append([project_x, project_y])
                 dis_list.append(dis)
+
+                # DEBUG: 前10个投影点的详细信息
+                if debug_count < 10:
+                    print(f"[DEBUG] Point {debug_count}: 3D({x:.3f}, {y:.3f}, {z:.3f}) -> "
+                          f"dis={dis:.3f} -> 2D({project_x:.3f}, {project_y:.3f})")
+                debug_count += 1
 
         if len(point_list_2d) <= 5:
             return []
@@ -475,13 +511,21 @@ class BTCDescManager:
         min_x, max_x = np.min(point_list_2d[:, 0]), np.max(point_list_2d[:, 0])
         min_y, max_y = np.min(point_list_2d[:, 1]), np.max(point_list_2d[:, 1])
 
-        # Create image grid
+        # Create image grid (exact C++ logic)
         segmen_base_num = 5
         segmen_len = segmen_base_num * resolution
         x_segment_num = int((max_x - min_x) / segmen_len) + 1
         y_segment_num = int((max_y - min_y) / segmen_len) + 1
         x_axis_len = int((max_x - min_x) / resolution) + segmen_base_num
         y_axis_len = int((max_y - min_y) / resolution) + segmen_base_num
+
+        # DEBUG: 图像网格参数
+        print(f"[DEBUG] Image grid parameters:")
+        print(f"  2D bounds: x[{min_x:.3f}, {max_x:.3f}], y[{min_y:.3f}, {max_y:.3f}]")
+        print(f"  resolution: {resolution}, segmen_base_num: {segmen_base_num}")
+        print(f"  grid size: x_axis_len={x_axis_len}, y_axis_len={y_axis_len}")
+        print(f"  segments: x_segment_num={x_segment_num}, y_segment_num={y_segment_num}")
+        print(f"  projected points count: {len(point_list_2d)}")
 
         # Initialize grids
         img_count = np.zeros((x_axis_len, y_axis_len))
@@ -491,6 +535,7 @@ class BTCDescManager:
         dis_containers = [[[] for _ in range(y_axis_len)] for _ in range(x_axis_len)]
 
         # Fill grids
+        valid_grid_count = 0
         for i, (px, py) in enumerate(point_list_2d):
             x_index = int((px - min_x) / resolution)
             y_index = int((py - min_y) / resolution)
@@ -500,6 +545,12 @@ class BTCDescManager:
                 mean_y_list[x_index, y_index] += py
                 img_count[x_index, y_index] += 1
                 dis_containers[x_index][y_index].append(dis_list[i])
+                valid_grid_count += 1
+
+        # DEBUG: 网格填充统计
+        print(f"[DEBUG] Grid filling:")
+        print(f"  Valid grid assignments: {valid_grid_count}/{len(point_list_2d)}")
+        print(f"  Non-empty grids: {np.sum(img_count > 0)}")
 
         # Calculate occupancy arrays
         cut_num = int((dis_threshold_max - dis_threshold_min) / high_inc)
@@ -532,6 +583,8 @@ class BTCDescManager:
         # Extract maximum points in each segment
         binary_list = []
 
+        segment_candidates = 0
+        segment_accepted = 0
         for x_seg in range(x_segment_num):
             for y_seg in range(y_segment_num):
                 max_dis = 0
@@ -545,12 +598,14 @@ class BTCDescManager:
                             max_x_idx, max_y_idx = x_idx, y_idx
 
                 if max_dis >= summary_min_thre and max_x_idx >= 0:
+                    segment_candidates += 1
                     # Check if it's a line (optional filtering)
                     is_add = True
                     if line_filter_enable and self._is_line_point(dis_array, max_x_idx, max_y_idx, max_dis):
                         is_add = False
 
                     if is_add:
+                        segment_accepted += 1
                         px = mean_x_list[max_x_idx, max_y_idx] / img_count[max_x_idx, max_y_idx]
                         py = mean_y_list[max_x_idx, max_y_idx] / img_count[max_x_idx, max_y_idx]
 
@@ -560,6 +615,13 @@ class BTCDescManager:
                         binary_desc = binary_containers[(max_x_idx, max_y_idx)]
                         binary_desc.location = coord
                         binary_list.append(binary_desc)
+
+        # DEBUG: 段落选择统计
+        print(f"[DEBUG] Segment selection:")
+        print(f"  summary_min_thre: {summary_min_thre}")
+        print(f"  segment_candidates: {segment_candidates}")
+        print(f"  segment_accepted: {segment_accepted}")
+        print(f"  line_filter_enable: {line_filter_enable}")
 
         return binary_list
 
@@ -668,16 +730,6 @@ class BTCDescManager:
                     points = [p1, p2, p3]
                     binaries = [bd_i, binary_list[indices[m]], binary_list[indices[n]]]
 
-                    # Sort points according to their involvement in sorted sides
-                    distances_matrix = np.array([
-                        [0, np.linalg.norm(p1 - p2), np.linalg.norm(p1 - p3)],
-                        [np.linalg.norm(p2 - p1), 0, np.linalg.norm(p2 - p3)],
-                        [np.linalg.norm(p3 - p1), np.linalg.norm(p3 - p2), 0]
-                    ])
-
-                    # Find which points form the shortest edge
-                    min_idx = np.unravel_index(np.argmin(distances_matrix + np.eye(3) * 1000), (3, 3))
-
                     # Assign binary descriptors to triangle vertices
                     binary_A = binaries[0]
                     binary_B = binaries[1]
@@ -709,7 +761,7 @@ class BTCDescManager:
         if self.print_debug_info:
             print(f"[Description] planes size: {len(plane_points)}")
 
-        # Step 3: Extract binary descriptors
+        # Step 3: Extract binary descriptors with FIXED projection plane selection
         proj_planes = self.get_projection_planes(voxel_map)
 
         if not proj_planes:
@@ -722,8 +774,10 @@ class BTCDescManager:
             )
             proj_planes = [default_plane]
         else:
+            # C++ logic: sort by points_size in descending order
             proj_planes.sort(key=lambda x: x.points_size, reverse=True)
 
+        # FIXED: Use exact C++ binary extraction logic
         binary_list = self.extract_binary_descriptors(proj_planes, input_cloud)
         self.history_binary_list.append(binary_list)
 

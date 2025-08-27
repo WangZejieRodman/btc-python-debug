@@ -1,0 +1,15 @@
+{
+  "total_frames": 50,
+  "trigger_loops": 0,
+  "true_loops": 0,
+  "false_loops": 0,
+  "precision": 0,
+  "timing": {
+    "mean_descriptor_time": 1458.342204093933,
+    "std_descriptor_time": 137.55574783873064,
+    "mean_query_time": 0.060181617736816406,
+    "std_query_time": 0.012168982372366889,
+    "mean_update_time": 0.43363094329833984,
+    "std_update_time": 0.09107215596548639
+  }
+}

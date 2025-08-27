@@ -1,0 +1,9 @@
+{
+  "frame_id": 30,
+  "binary_descriptors_count": 42,
+  "binary_summary_stats": {
+    "min_summary": 10,
+    "max_summary": 32,
+    "mean_summary": 17.61904761904762
+  }
+}

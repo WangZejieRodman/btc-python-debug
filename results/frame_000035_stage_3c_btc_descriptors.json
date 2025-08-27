@@ -1,0 +1,9 @@
+{
+  "frame_id": 35,
+  "btc_count": 594,
+  "triangle_stats": {
+    "min_side_length": 11.261617794944796,
+    "max_side_length": 188.37148492980262,
+    "mean_side_length": 66.47484932334532
+  }
+}
