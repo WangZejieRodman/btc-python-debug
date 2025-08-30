@@ -29,7 +29,7 @@ class ConfigSetting:
     proj_image_high_inc: float = 0.1
     proj_dis_min: float = -1.0
     proj_dis_max: float = 4.0
-    summary_min_thre: int = 6
+    summary_min_thre: int = 10
     line_filter_enable: int = 0
 
     # Triangle descriptor parameters
@@ -117,14 +117,14 @@ class BTCDescManager:
         config.proj_image_high_inc = config_data.get('proj_image_high_inc', 0.1)
         config.proj_dis_min = config_data.get('proj_dis_min', -1.0)
         config.proj_dis_max = config_data.get('proj_dis_max', 4.0)
-        config.summary_min_thre = config_data.get('summary_min_thre', 6)
+        config.summary_min_thre = config_data.get('summary_min_thre', 10)
         config.line_filter_enable = config_data.get('line_filter_enable', 0)
 
         # Triangle descriptor
         config.descriptor_near_num = config_data.get('descriptor_near_num', 10)
         config.descriptor_min_len = config_data.get('descriptor_min_len', 1.0)
         config.descriptor_max_len = config_data.get('descriptor_max_len', 10.0)
-        config.non_max_suppression_radius = config_data.get('max_constrait_dis', 3.0)
+        config.non_max_suppression_radius = config_data.get('max_constrait_dis', 2.0)
         config.std_side_resolution = config_data.get('triangle_resolution', 0.2)
 
         # Candidate search
@@ -260,6 +260,7 @@ class BTCDescManager:
             min_eigen_value=eigenvalues[0],
             radius=np.sqrt(eigenvalues[2]),  # Largest eigenvalue -> radius
             points_size=len(voxel_points),
+            sub_plane_num=0,  # 修复：原始平面sub_plane_num为0
             is_plane=eigenvalues[0] < self.config_setting.plane_detection_thre
         )
 
@@ -303,31 +304,37 @@ class BTCDescManager:
 
     def merge_planes(self, origin_list: List[Plane]) -> List[Plane]:
         """Merge similar planes with exact C++ logic"""
+        print(f"[DEBUG] merge_planes called with {len(origin_list)} planes")
         if len(origin_list) <= 1:
             return origin_list
 
-        # Initialize plane IDs
+        # Initialize plane IDs (exact C++ logic)
         for plane in origin_list:
             plane.id = 0
 
         current_id = 1
 
-        # C++ reverse iteration logic
-        for i in range(len(origin_list) - 1, 0, -1):
-            for j in range(i):
+        # CRITICAL: Use exact C++ reverse iteration pattern
+        # C++: for (auto iter = origin_list.end() - 1; iter != origin_list.begin(); iter--)
+        for i in range(len(origin_list) - 1, 0, -1):  # 从 len-1 到 1
+            for j in range(i):  # 从 0 到 i-1
                 plane1, plane2 = origin_list[i], origin_list[j]
 
+                # Exact C++ normal comparison logic
                 normal_diff = np.linalg.norm(plane1.normal - plane2.normal)
                 normal_add = np.linalg.norm(plane1.normal + plane2.normal)
 
+                # Exact C++ distance calculation
                 dis1 = abs(np.dot(plane1.normal, plane2.center) + plane1.d)
                 dis2 = abs(np.dot(plane2.normal, plane1.center) + plane2.d)
 
+                # Exact C++ merge conditions
                 if ((normal_diff < self.config_setting.plane_merge_normal_thre or
                      normal_add < self.config_setting.plane_merge_normal_thre) and
                         dis1 < self.config_setting.plane_merge_dis_thre and
                         dis2 < self.config_setting.plane_merge_dis_thre):
 
+                    # CRITICAL: Exact C++ ID assignment logic
                     if plane1.id == 0 and plane2.id == 0:
                         plane1.id = current_id
                         plane2.id = current_id
@@ -337,7 +344,7 @@ class BTCDescManager:
                     elif plane1.id != 0 and plane2.id == 0:
                         plane2.id = plane1.id
 
-        # Merge planes with same ID
+        # Merge planes with same ID (exact C++ logic)
         merged_planes = []
         processed_ids = set()
 
@@ -350,40 +357,51 @@ class BTCDescManager:
                 # Find all planes with same ID and merge them
                 same_id_planes = [p for p in origin_list if p.id == plane.id]
                 if len(same_id_planes) > 1:
-                    merged_plane = self.merge_plane_group(same_id_planes)
+                    merged_plane = self.merge_plane_group_exact_cpp(same_id_planes)
                     merged_planes.append(merged_plane)
                 else:
                     merged_planes.append(plane)
 
+        print(f"[DEBUG] merge_planes result: {len(merged_planes)} planes")
         return merged_planes
 
-    def merge_plane_group(self, planes: List[Plane]) -> Plane:
-        """Merge a group of planes with same ID"""
+    def merge_plane_group_exact_cpp(self, planes: List[Plane]) -> Plane:
+        """Merge plane group using exact C++ covariance reconstruction"""
         total_points = sum(p.points_size for p in planes)
 
-        # Weighted center
+        # Weighted center (exact C++ formula)
         weighted_center = sum(p.center * p.points_size for p in planes) / total_points
 
-        # Merge covariances (exact C++ logic)
+        # CRITICAL: Exact C++ covariance merging formula
         merged_covariance = np.zeros((3, 3))
         for p in planes:
+            # Exact C++: P_PT = (covariance + center*center^T) * points_size
             P_PT = (p.covariance + np.outer(p.center, p.center)) * p.points_size
             merged_covariance += P_PT
 
+        # Final covariance calculation
         merged_covariance = merged_covariance / total_points - np.outer(weighted_center, weighted_center)
 
-        # Recalculate normal and radius
+        # CRITICAL: Exact C++ eigenvalue sorting
         eigenvalues, eigenvectors = np.linalg.eigh(merged_covariance)
-        idx = np.argsort(eigenvalues)
+
+        # C++ uses: evalsReal.rowwise().sum().minCoeff(&evalsMin)
+        # This is equivalent to finding the minimum eigenvalue index
+        evals_min_idx = np.argmin(eigenvalues)
+        evals_max_idx = np.argmax(eigenvalues)
+
+        # Correct sub_plane_num accumulation
+        total_sub_plane_num = sum(p.sub_plane_num if p.sub_plane_num > 0 else 1 for p in planes)
 
         merged_plane = Plane(
             center=weighted_center,
-            normal=eigenvectors[:, idx[0]],
+            normal=eigenvectors[:, evals_min_idx],  # Use minimum eigenvalue eigenvector
             covariance=merged_covariance,
-            radius=np.sqrt(eigenvalues[idx[2]]),
+            radius=np.sqrt(eigenvalues[evals_max_idx]),
             points_size=total_points,
-            sub_plane_num=len(planes),
-            is_plane=True
+            sub_plane_num=total_sub_plane_num,
+            is_plane=True,
+            id=planes[0].id  # Keep the same ID
         )
 
         merged_plane.d = -np.dot(merged_plane.normal, merged_plane.center)
@@ -444,7 +462,7 @@ class BTCDescManager:
 
     def extract_binary_from_plane(self, proj_center: np.ndarray, proj_normal: np.ndarray,
                                   input_cloud: np.ndarray) -> List[BinaryDescriptor]:
-        """Extract binary descriptors from a single projection plane"""
+        """Extract binary descriptors from a single projection plane with FIXED coordinate system"""
         resolution = self.config_setting.proj_image_resolution
         dis_threshold_min = self.config_setting.proj_dis_min
         dis_threshold_max = self.config_setting.proj_dis_max
@@ -455,26 +473,36 @@ class BTCDescManager:
         A, B, C = proj_normal
         D = -np.dot(proj_normal, proj_center)
 
-        # Create coordinate system (exact C++ logic)
+        # FIXED: Create coordinate system exactly matching C++ logic
         x_axis = np.array([1.0, 0.0, 0.0])
         if C != 0:
             x_axis[2] = -(A + B) / C
         elif B != 0:
             x_axis[1] = -A / B
         else:
-            x_axis = np.array([0.0, 1.0, 0.0])
+            # FIXED: Match C++ logic exactly
+            x_axis[0] = 0.0
+            x_axis[1] = 1.0
+            # x_axis[2] remains 0.0
 
         x_axis = x_axis / np.linalg.norm(x_axis)
         y_axis = np.cross(proj_normal, x_axis)
         y_axis = y_axis / np.linalg.norm(y_axis)
 
+        # FIXED: Calculate coefficients exactly like C++
+        ax, bx, cx = x_axis
+        dx = -(ax * proj_center[0] + bx * proj_center[1] + cx * proj_center[2])
+        ay, by, cy = y_axis
+        dy = -(ay * proj_center[0] + by * proj_center[1] + cy * proj_center[2])
+
         # DEBUG: 投影坐标系
-        print(f"[DEBUG] Projection coordinate system:")
-        print(f"  proj_normal: {proj_normal}")
-        print(f"  proj_center: {proj_center}")
-        print(f"  x_axis: {x_axis}")
-        print(f"  y_axis: {y_axis}")
-        print(f"  A,B,C,D: {A}, {B}, {C}, {D}")
+        if self.print_debug_info:
+            print(f"[DEBUG] Projection coordinate system:")
+            print(f"  proj_normal: {proj_normal}")
+            print(f"  proj_center: {proj_center}")
+            print(f"  x_axis: {x_axis}")
+            print(f"  y_axis: {y_axis}")
+            print(f"  A,B,C,D: {A}, {B}, {C}, {D}")
 
         # Project points
         point_list_2d = []
@@ -486,18 +514,21 @@ class BTCDescManager:
             dis = x * A + y * B + z * C + D
 
             if dis_threshold_min < dis <= dis_threshold_max:
-                # Project point onto plane
-                proj_point = np.array([x, y, z]) - dis * proj_normal
+                # FIXED: Project point onto plane using exact C++ method
+                cur_project = np.zeros(3)
+                cur_project[0] = (-A * (B * y + C * z + D) + x * (B * B + C * C)) / (A * A + B * B + C * C)
+                cur_project[1] = (-B * (A * x + C * z + D) + y * (A * A + C * C)) / (A * A + B * B + C * C)
+                cur_project[2] = (-C * (A * x + B * y + D) + z * (A * A + B * B)) / (A * A + B * B + C * C)
 
-                # Convert to 2D coordinates (C++ uses different variable names but same logic)
-                project_x = np.dot(proj_point - proj_center, y_axis)
-                project_y = np.dot(proj_point - proj_center, x_axis)
+                # FIXED: Calculate 2D coordinates exactly matching C++ logic
+                project_x = cur_project[0] * ay + cur_project[1] * by + cur_project[2] * cy + dy
+                project_y = cur_project[0] * ax + cur_project[1] * bx + cur_project[2] * cx + dx
 
                 point_list_2d.append([project_x, project_y])
                 dis_list.append(dis)
 
                 # DEBUG: 前10个投影点的详细信息
-                if debug_count < 10:
+                if debug_count < 10 and self.print_debug_info:
                     print(f"[DEBUG] Point {debug_count}: 3D({x:.3f}, {y:.3f}, {z:.3f}) -> "
                           f"dis={dis:.3f} -> 2D({project_x:.3f}, {project_y:.3f})")
                 debug_count += 1
@@ -520,12 +551,13 @@ class BTCDescManager:
         y_axis_len = int((max_y - min_y) / resolution) + segmen_base_num
 
         # DEBUG: 图像网格参数
-        print(f"[DEBUG] Image grid parameters:")
-        print(f"  2D bounds: x[{min_x:.3f}, {max_x:.3f}], y[{min_y:.3f}, {max_y:.3f}]")
-        print(f"  resolution: {resolution}, segmen_base_num: {segmen_base_num}")
-        print(f"  grid size: x_axis_len={x_axis_len}, y_axis_len={y_axis_len}")
-        print(f"  segments: x_segment_num={x_segment_num}, y_segment_num={y_segment_num}")
-        print(f"  projected points count: {len(point_list_2d)}")
+        if self.print_debug_info:
+            print(f"[DEBUG] Image grid parameters:")
+            print(f"  2D bounds: x[{min_x:.3f}, {max_x:.3f}], y[{min_y:.3f}, {max_y:.3f}]")
+            print(f"  resolution: {resolution}, segmen_base_num: {segmen_base_num}")
+            print(f"  grid size: x_axis_len={x_axis_len}, y_axis_len={y_axis_len}")
+            print(f"  segments: x_segment_num={x_segment_num}, y_segment_num={y_segment_num}")
+            print(f"  projected points count: {len(point_list_2d)}")
 
         # Initialize grids
         img_count = np.zeros((x_axis_len, y_axis_len))
@@ -548,9 +580,10 @@ class BTCDescManager:
                 valid_grid_count += 1
 
         # DEBUG: 网格填充统计
-        print(f"[DEBUG] Grid filling:")
-        print(f"  Valid grid assignments: {valid_grid_count}/{len(point_list_2d)}")
-        print(f"  Non-empty grids: {np.sum(img_count > 0)}")
+        if self.print_debug_info:
+            print(f"[DEBUG] Grid filling:")
+            print(f"  Valid grid assignments: {valid_grid_count}/{len(point_list_2d)}")
+            print(f"  Non-empty grids: {np.sum(img_count > 0)}")
 
         # Calculate occupancy arrays
         cut_num = int((dis_threshold_max - dis_threshold_min) / high_inc)
@@ -585,23 +618,27 @@ class BTCDescManager:
 
         segment_candidates = 0
         segment_accepted = 0
+
+        # FIXED: Use exact C++ segment selection logic
         for x_seg in range(x_segment_num):
             for y_seg in range(y_segment_num):
                 max_dis = 0
                 max_x_idx = max_y_idx = -1
 
-                for x_idx in range(x_seg * segmen_base_num, (x_seg + 1) * segmen_base_num):
-                    for y_idx in range(y_seg * segmen_base_num, (y_seg + 1) * segmen_base_num):
-                        if (x_idx < x_axis_len and y_idx < y_axis_len and
-                                dis_array[x_idx, y_idx] > max_dis):
+                # Find maximum in this segment
+                for x_idx in range(x_seg * segmen_base_num, min((x_seg + 1) * segmen_base_num, x_axis_len)):
+                    for y_idx in range(y_seg * segmen_base_num, min((y_seg + 1) * segmen_base_num, y_axis_len)):
+                        if dis_array[x_idx, y_idx] > max_dis:
                             max_dis = dis_array[x_idx, y_idx]
                             max_x_idx, max_y_idx = x_idx, y_idx
 
                 if max_dis >= summary_min_thre and max_x_idx >= 0:
                     segment_candidates += 1
-                    # Check if it's a line (optional filtering)
+
+                    # FIXED: Check if it's a line (exact C++ logic)
                     is_add = True
-                    if line_filter_enable and self._is_line_point(dis_array, max_x_idx, max_y_idx, max_dis):
+                    if line_filter_enable and self._is_line_point_fixed(dis_array, max_x_idx, max_y_idx, max_dis,
+                                                                        x_axis_len, y_axis_len):
                         is_add = False
 
                     if is_add:
@@ -609,7 +646,7 @@ class BTCDescManager:
                         px = mean_x_list[max_x_idx, max_y_idx] / img_count[max_x_idx, max_y_idx]
                         py = mean_y_list[max_x_idx, max_y_idx] / img_count[max_x_idx, max_y_idx]
 
-                        # Convert back to 3D coordinates
+                        # FIXED: Convert back to 3D coordinates using exact C++ method
                         coord = py * x_axis + px * y_axis + proj_center
 
                         binary_desc = binary_containers[(max_x_idx, max_y_idx)]
@@ -617,59 +654,87 @@ class BTCDescManager:
                         binary_list.append(binary_desc)
 
         # DEBUG: 段落选择统计
-        print(f"[DEBUG] Segment selection:")
-        print(f"  summary_min_thre: {summary_min_thre}")
-        print(f"  segment_candidates: {segment_candidates}")
-        print(f"  segment_accepted: {segment_accepted}")
-        print(f"  line_filter_enable: {line_filter_enable}")
+        if self.print_debug_info:
+            print(f"[DEBUG] Segment selection:")
+            print(f"  summary_min_thre: {summary_min_thre}")
+            print(f"  segment_candidates: {segment_candidates}")
+            print(f"  segment_accepted: {segment_accepted}")
+            print(f"  line_filter_enable: {line_filter_enable}")
 
         return binary_list
 
-    def _is_line_point(self, dis_array: np.ndarray, x: int, y: int, max_dis: float) -> bool:
-        """Check if a point is part of a line structure"""
-        if (x <= 0 or x >= dis_array.shape[0] - 1 or
-                y <= 0 or y >= dis_array.shape[1] - 1):
+    def _is_line_point_fixed(self, dis_array: np.ndarray, x: int, y: int, max_dis: float, x_axis_len: int,
+                             y_axis_len: int) -> bool:
+        """Check if a point is part of a line structure using exact C++ logic"""
+        if (x <= 0 or x >= x_axis_len - 1 or y <= 0 or y >= y_axis_len - 1):
             return False
 
+        # FIXED: Use exact C++ direction logic
         directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
         threshold = max_dis - 3
 
         for dx, dy in directions:
-            p1_val = dis_array[x + dx, y + dy]
-            p2_val = dis_array[x - dx, y - dy]
+            p1_x, p1_y = x + dx, y + dy
+            p2_x, p2_y = x - dx, y - dy
 
-            if p1_val >= threshold and p2_val >= 0.5 * max_dis:
-                return True
-            if p2_val >= threshold and p1_val >= 0.5 * max_dis:
-                return True
-            if p1_val >= threshold and p2_val >= threshold:
-                return True
+            # Ensure indices are within bounds
+            if (0 <= p1_x < x_axis_len and 0 <= p1_y < y_axis_len and
+                    0 <= p2_x < x_axis_len and 0 <= p2_y < y_axis_len):
+
+                p1_val = dis_array[p1_x, p1_y]
+                p2_val = dis_array[p2_x, p2_y]
+
+                # FIXED: Use exact C++ filtering conditions
+                if p1_val >= threshold and p2_val >= 0.5 * max_dis:
+                    return True
+                if p2_val >= threshold and p1_val >= 0.5 * max_dis:
+                    return True
+                if p1_val >= threshold and p2_val >= threshold:
+                    return True
 
         return False
 
     def non_max_suppression(self, binary_list: List[BinaryDescriptor]) -> List[BinaryDescriptor]:
-        """Apply non-maximum suppression to binary descriptors"""
+        """Apply non-maximum suppression using exact C++ logic"""
         if not binary_list:
             return binary_list
 
+        # Build point cloud and preprocessing (matching C++ exactly)
         locations = np.array([bd.location for bd in binary_list])
         tree = KDTree(locations)
         radius = self.config_setting.non_max_suppression_radius
 
-        keep_flags = [True] * len(binary_list)
+        # Pre-compute summary list (matching C++ pre_count_list)
+        pre_count_list = [bd.summary for bd in binary_list]
+        is_add_list = [True] * len(binary_list)
 
-        for i, bd in enumerate(binary_list):
-            if not keep_flags[i]:
-                continue
+        # FIXED: Use exact C++ suppression logic
+        for i in range(len(binary_list)):
+            search_point = binary_list[i].location
 
-            indices = tree.query_ball_point(bd.location, radius)
+            # Find all neighbors within radius
+            indices = tree.query_ball_point(search_point, radius)
 
-            for j in indices:
-                if i != j and keep_flags[j] and binary_list[i].summary <= binary_list[j].summary:
-                    keep_flags[i] = False
-                    break
+            if len(indices) > 0:
+                # FIXED: Check ALL neighbors, don't skip based on current status
+                for j in indices:
+                    if j == i:
+                        continue  # Skip self
 
-        return [bd for i, bd in enumerate(binary_list) if keep_flags[i]]
+                    # FIXED: Use exact C++ comparison logic
+                    # If current point summary <= neighbor summary, mark current for removal
+                    if pre_count_list[i] <= pre_count_list[j]:
+                        is_add_list[i] = False
+                        # FIXED: Don't break, continue checking all neighbors
+                        # This matches C++ behavior exactly
+
+        # Collect surviving points
+        result_list = []
+        for i, is_add in enumerate(is_add_list):
+            if is_add:
+                result_list.append(binary_list[i])
+
+        return result_list
 
     def generate_btc_descriptors(self, binary_list: List[BinaryDescriptor], frame_id: int) -> List[BTC]:
         """Generate BTC descriptors from binary descriptors"""
