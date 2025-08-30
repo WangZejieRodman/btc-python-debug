@@ -88,7 +88,11 @@ def analyze_voxelization_differences(points, python_manager, cpp_results_dir, fr
     voxel_map_manual = {}
     for i, point in enumerate(points):
         loc_xyz = point[:3] / config.voxel_size
-        loc_xyz = np.floor(loc_xyz).astype(int)
+        # CRITICAL: Match C++ logic exactly
+        for j in range(3):
+            if loc_xyz[j] < 0:
+                loc_xyz[j] -= 1.0
+        loc_xyz = np.floor(loc_xyz).astype(np.int64)
         voxel_key = tuple(loc_xyz)
 
         if voxel_key not in voxel_map_manual:
@@ -109,54 +113,120 @@ def analyze_voxelization_differences(points, python_manager, cpp_results_dir, fr
 
 
 def analyze_plane_detection_differences(points, python_manager, cpp_results_dir, frame_id):
-    """Analyze differences in plane detection"""
+    """Analyze differences in plane detection with both original and merged planes"""
     print(f"\n=== Analyzing Plane Detection for Frame {frame_id} ===")
 
-    # Generate Python planes
+    # Generate Python planes and get internal data
     btc_list = python_manager.generate_btc_descs(points, frame_id)
-    python_planes = python_manager.plane_cloud_vec[-1] if python_manager.plane_cloud_vec else []
 
-    # Load C++ planes
-    cpp_planes_file = os.path.join(cpp_results_dir, f"frame_{frame_id:06d}_planes_detailed.txt")
-    cpp_planes = load_cpp_detailed_file(cpp_planes_file, 'planes')
+    # Get original planes (stored in plane_cloud_vec)
+    python_original_planes = python_manager.plane_cloud_vec[-1] if python_manager.plane_cloud_vec else []
 
-    print(f"Python planes: {len(python_planes)}")
-    print(f"C++ planes: {len(cpp_planes)}")
+    # Get merged planes by re-running the process
+    voxel_map = python_manager.init_voxel_map(points)
+    python_merged_planes_objs = python_manager.get_projection_planes(voxel_map)
 
-    if len(python_planes) > 0 and len(cpp_planes) > 0:
-        # Analyze plane properties
-        python_centers = np.array([[p[0], p[1], p[2]] for p in python_planes])
-        python_normals = np.array([[p[3], p[4], p[5]] for p in python_planes])
+    # Convert merged plane objects to array format
+    python_merged_planes = []
+    for plane in python_merged_planes_objs:
+        plane_point = np.concatenate([plane.center, plane.normal])
+        python_merged_planes.append(plane_point)
 
-        cpp_centers = np.array([[p[0], p[1], p[2]] for p in cpp_planes])
-        cpp_normals = np.array([[p[3], p[4], p[5]] for p in cpp_planes])
+    # Load C++ planes - try both original and merged files
+    cpp_original_file = os.path.join(cpp_results_dir, f"frame_{frame_id:06d}_planes_original.txt")
+    cpp_merged_file = os.path.join(cpp_results_dir, f"frame_{frame_id:06d}_planes_merged.txt")
+
+    # Try to load original planes first, fallback to detailed file
+    if os.path.exists(cpp_original_file):
+        cpp_original_planes = load_cpp_detailed_file(cpp_original_file, 'planes')
+    else:
+        # Fallback to the detailed file (which should be original planes based on C++ code)
+        cpp_detailed_file = os.path.join(cpp_results_dir, f"frame_{frame_id:06d}_planes_detailed.txt")
+        cpp_original_planes = load_cpp_detailed_file(cpp_detailed_file, 'planes')
+
+    # Load merged planes if available
+    cpp_merged_planes = []
+    if os.path.exists(cpp_merged_file):
+        cpp_merged_planes = load_cpp_detailed_file(cpp_merged_file, 'planes')
+
+    print(f"Python original planes: {len(python_original_planes)}")
+    print(f"Python merged planes: {len(python_merged_planes)}")
+    print(f"C++ original planes: {len(cpp_original_planes)}")
+    if cpp_merged_planes:
+        print(f"C++ merged planes: {len(cpp_merged_planes)}")
+    else:
+        print("C++ merged planes: Not available")
+
+    # Analyze original planes comparison
+    if len(python_original_planes) > 0 and len(cpp_original_planes) > 0:
+        python_orig_centers = np.array([[p[0], p[1], p[2]] for p in python_original_planes])
+        python_orig_normals = np.array([[p[3], p[4], p[5]] for p in python_original_planes])
+
+        cpp_orig_centers = np.array([[p[0], p[1], p[2]] for p in cpp_original_planes])
+        cpp_orig_normals = np.array([[p[3], p[4], p[5]] for p in cpp_original_planes])
+
+        print(f"\n=== ORIGINAL PLANES COMPARISON ===")
+        print(
+            f"Python original centers - Mean: {np.mean(python_orig_centers, axis=0)}, Std: {np.std(python_orig_centers, axis=0)}")
+        print(
+            f"C++ original centers - Mean: {np.mean(cpp_orig_centers, axis=0)}, Std: {np.std(cpp_orig_centers, axis=0)}")
 
         print(
-            f"\nPython plane centers - Mean: {np.mean(python_centers, axis=0)}, Std: {np.std(python_centers, axis=0)}")
-        print(f"C++ plane centers - Mean: {np.mean(cpp_centers, axis=0)}, Std: {np.std(cpp_centers, axis=0)}")
-
+            f"Python original normals - Mean: {np.mean(python_orig_normals, axis=0)}, Std: {np.std(python_orig_normals, axis=0)}")
         print(
-            f"\nPython plane normals - Mean: {np.mean(python_normals, axis=0)}, Std: {np.std(python_normals, axis=0)}")
-        print(f"C++ plane normals - Mean: {np.mean(cpp_normals, axis=0)}, Std: {np.std(cpp_normals, axis=0)}")
+            f"C++ original normals - Mean: {np.mean(cpp_orig_normals, axis=0)}, Std: {np.std(cpp_orig_normals, axis=0)}")
 
-        # Find closest matches
+        # Find matches for original planes
         from scipy.spatial.distance import cdist
-        center_distances = cdist(python_centers, cpp_centers)
+        orig_distances = cdist(python_orig_centers, cpp_orig_centers)
 
-        matches = 0
-        for i in range(min(10, len(python_centers))):  # Check first 10 planes
-            closest_idx = np.argmin(center_distances[i])
-            closest_dist = center_distances[i, closest_idx]
+        orig_matches = 0
+        for i in range(min(10, len(python_orig_centers))):
+            closest_idx = np.argmin(orig_distances[i])
+            closest_dist = orig_distances[i, closest_idx]
 
-            if closest_dist < 1.0:  # Within 1m
-                matches += 1
-                # Check normal similarity
-                normal_diff = np.linalg.norm(python_normals[i] - cpp_normals[closest_idx])
-                print(f"Match {i}: distance={closest_dist:.3f}, normal_diff={normal_diff:.3f}")
+            if closest_dist < 1.0:
+                orig_matches += 1
+                normal_diff = np.linalg.norm(python_orig_normals[i] - cpp_orig_normals[closest_idx])
+                print(f"Original Match {i}: distance={closest_dist:.3f}, normal_diff={normal_diff:.3f}")
 
-        print(f"Plane matches within 1m: {matches}/{min(10, len(python_centers))}")
+        print(f"Original plane matches within 1m: {orig_matches}/{min(10, len(python_orig_centers))}")
 
-    return python_planes, cpp_planes
+    # Analyze merged planes comparison if available
+    if len(python_merged_planes) > 0 and len(cpp_merged_planes) > 0:
+        python_merged_centers = np.array([[p[0], p[1], p[2]] for p in python_merged_planes])
+        python_merged_normals = np.array([[p[3], p[4], p[5]] for p in python_merged_planes])
+
+        cpp_merged_centers = np.array([[p[0], p[1], p[2]] for p in cpp_merged_planes])
+        cpp_merged_normals = np.array([[p[3], p[4], p[5]] for p in cpp_merged_planes])
+
+        print(f"\n=== MERGED PLANES COMPARISON ===")
+        print(
+            f"Python merged centers - Mean: {np.mean(python_merged_centers, axis=0)}, Std: {np.std(python_merged_centers, axis=0)}")
+        print(
+            f"C++ merged centers - Mean: {np.mean(cpp_merged_centers, axis=0)}, Std: {np.std(cpp_merged_centers, axis=0)}")
+
+        print(
+            f"Python merged normals - Mean: {np.mean(python_merged_normals, axis=0)}, Std: {np.std(python_merged_normals, axis=0)}")
+        print(
+            f"C++ merged normals - Mean: {np.mean(cpp_merged_normals, axis=0)}, Std: {np.std(cpp_merged_normals, axis=0)}")
+
+        # Find matches for merged planes
+        merged_distances = cdist(python_merged_centers, cpp_merged_centers)
+
+        merged_matches = 0
+        for i in range(min(10, len(python_merged_centers))):
+            closest_idx = np.argmin(merged_distances[i])
+            closest_dist = merged_distances[i, closest_idx]
+
+            if closest_dist < 1.0:
+                merged_matches += 1
+                normal_diff = np.linalg.norm(python_merged_normals[i] - cpp_merged_normals[closest_idx])
+                print(f"Merged Match {i}: distance={closest_dist:.3f}, normal_diff={normal_diff:.3f}")
+
+        print(f"Merged plane matches within 1m: {merged_matches}/{min(10, len(python_merged_centers))}")
+
+    return python_original_planes, cpp_original_planes, python_merged_planes, cpp_merged_planes
 
 
 def analyze_binary_descriptor_differences(points, python_manager, cpp_results_dir, frame_id):
@@ -226,9 +296,9 @@ def debug_configuration_impact():
     }
 
     # Modify test configurations
-    configs['smaller_voxel'].voxel_size = 1.5  # Smaller than default 2.0
-    configs['larger_threshold'].plane_detection_thre = 0.02  # Larger than default 0.01
-    configs['more_corners'].useful_corner_num = 1000  # More than default 500
+    configs['smaller_voxel'].voxel_size = 1.5
+    configs['larger_threshold'].plane_detection_thre = 0.02
+    configs['more_corners'].useful_corner_num = 1000
 
     # Load default outdoor config
     if os.path.exists('config_outdoor.yaml'):
@@ -288,7 +358,10 @@ def run_comprehensive_debug(python_results_dir, cpp_results_dir, max_frames=3):
 
     # Run detailed analysis
     valid_voxels = analyze_voxelization_differences(points, manager, cpp_results_dir, test_frame)
-    python_planes, cpp_planes = analyze_plane_detection_differences(points, manager, cpp_results_dir, test_frame)
+    py_orig_planes, cpp_orig_planes, py_merged_planes, cpp_merged_planes = analyze_plane_detection_differences(points,
+                                                                                                               manager,
+                                                                                                               cpp_results_dir,
+                                                                                                               test_frame)
     python_binaries, cpp_binaries = analyze_binary_descriptor_differences(points, manager, cpp_results_dir, test_frame)
 
     # Performance comparison
@@ -303,7 +376,7 @@ def run_comprehensive_debug(python_results_dir, cpp_results_dir, max_frames=3):
     print(f"Python average time: {python_time:.2f}ms")
     print(f"Expected C++ time: ~{python_time / 100:.2f}ms (estimated)")
 
-    # Recommendations
+    # Updated recommendations based on new analysis
     print(f"\n=== RECOMMENDATIONS ===")
     print("1. Main differences are in plane detection and merging")
     print("2. Check voxelization implementation - ensure identical grid alignment")
@@ -312,15 +385,21 @@ def run_comprehensive_debug(python_results_dir, cpp_results_dir, max_frames=3):
     print("5. Check non-maximum suppression radius and implementation")
     print("6. Verify binary descriptor projection and quantization")
 
-    if len(python_planes) > len(cpp_planes):
-        print("7. Python generates MORE planes - check plane merging logic")
+    # Updated plane analysis recommendations
+    if len(py_orig_planes) > len(cpp_orig_planes):
+        print("7. Python generates MORE original planes - check plane detection threshold")
+    elif len(py_orig_planes) < len(cpp_orig_planes):
+        print("7. Python generates FEWER original planes - check plane detection threshold")
     else:
-        print("7. Python generates FEWER planes - check plane detection threshold")
+        print("7. Original plane counts match - focus on merging differences")
+
+    if len(py_merged_planes) != len(cpp_merged_planes):
+        print("8. Merged plane counts differ - check plane merging logic")
 
     if len(python_binaries) != len(cpp_binaries):
-        print("8. Binary descriptor counts differ - check projection plane selection")
+        print("9. Binary descriptor counts differ - check projection plane selection")
 
-    print(f"9. Performance optimization needed - Python is ~{python_time / 10:.0f}x slower")
+    print(f"10. Performance optimization needed - Python is ~{python_time / 10:.0f}x slower")
 
 
 if __name__ == "__main__":
