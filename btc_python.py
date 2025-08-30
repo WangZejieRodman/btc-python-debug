@@ -232,7 +232,7 @@ class BTCDescManager:
 
     def init_plane(self, voxel_points: np.ndarray) -> Optional[Plane]:
         """Initialize plane from voxel points"""
-        if len(voxel_points) < self.config_setting.voxel_init_num:
+        if len(voxel_points) <= self.config_setting.voxel_init_num:
             return None
 
         # Calculate center
@@ -413,14 +413,50 @@ class BTCDescManager:
         common_bits = sum(1 for a, b in zip(b1.occupy_array, b2.occupy_array) if a and b)
         return 2 * common_bits / (b1.summary + b2.summary) if (b1.summary + b2.summary) > 0 else 0
 
+    # 临时调试修改 - 在 extract_binary_descriptors 函数开头添加：
+    def extract_binary_descriptors_debug_override(self, proj_planes: List[Plane], input_cloud: np.ndarray) -> List[
+        BinaryDescriptor]:
+        """临时调试版本：强制使用第一个合并平面"""
+        print(f"[DEBUG] DEBUG OVERRIDE: extract_binary_descriptors with {len(proj_planes)} planes")
+
+        if len(proj_planes) == 0:
+            print(f"[DEBUG] No projection planes available!")
+            return []
+
+        # 强制使用第一个合并平面
+        first_plane = proj_planes[0]
+        print(f"[DEBUG] FORCED: Using first plane: normal={first_plane.normal}, center={first_plane.center}")
+        print(f"[DEBUG] FORCED: First plane points_size={first_plane.points_size}")
+
+        binary_list = self.extract_binary_from_plane(first_plane.center, first_plane.normal, input_cloud)
+
+        print(f"[DEBUG] FORCED: First plane produced {len(binary_list)} binary descriptors")
+
+        # Apply non-maximum suppression
+        binary_list = self.non_max_suppression(binary_list)
+
+        # Keep only the best corners
+        if len(binary_list) > self.config_setting.useful_corner_num:
+            binary_list.sort(key=lambda x: x.summary, reverse=True)
+            binary_list = binary_list[:self.config_setting.useful_corner_num]
+
+        print(f"[DEBUG] FORCED: Final result: {len(binary_list)} binary descriptors")
+        return binary_list
+
     def extract_binary_descriptors(self, proj_planes: List[Plane], input_cloud: np.ndarray) -> List[BinaryDescriptor]:
         """
-        Extract binary descriptors with EXACT C++ logic
-        This is the key function that was causing the major differences
+        Extract binary descriptors with EXACT C++ logic and detailed debugging
         """
+        print(f"[DEBUG] extract_binary_descriptors called with {len(proj_planes)} planes")
+        print(f"[DEBUG] Input cloud size: {len(input_cloud)}")
+
         binary_list = []
         last_normal = np.zeros(3)  # C++ uses this to track previous normal
         useful_proj_num = 0
+
+        # DEBUG: Show all available planes
+        for i, plane in enumerate(proj_planes):
+            print(f"[DEBUG] Plane {i}: center={plane.center}, normal={plane.normal}, points={plane.points_size}")
 
         # C++ logic: iterate through sorted projection planes
         for i, plane in enumerate(proj_planes):
@@ -431,12 +467,24 @@ class BTCDescManager:
             if proj_normal[2] < 0:
                 proj_normal = -proj_normal
 
+            print(f"[DEBUG] Processing plane {i}: normal={proj_normal}")
+
             # C++ key filtering logic: check normal difference with last used normal
             normal_diff = np.linalg.norm(proj_normal - last_normal)
             normal_add = np.linalg.norm(proj_normal + last_normal)
 
+            print(f"[DEBUG] last_normal={last_normal}")
+            print(f"[DEBUG] normal_diff={normal_diff:.6f}, normal_add={normal_add:.6f}")
+
             # C++ condition for accepting this projection plane
-            if normal_diff < 0.3 or normal_add > 0.3:
+            # NOTE: This condition might be wrong - let's test different interpretations
+            condition1 = normal_diff < 0.3 or normal_add > 0.3
+            condition2 = normal_diff >= 0.3 and normal_add <= 0.3  # Alternative interpretation
+
+            print(f"[DEBUG] condition1 (current): {condition1}")
+            print(f"[DEBUG] condition2 (alternative): {condition2}")
+
+            if condition1:  # Using current logic
                 last_normal = proj_normal.copy()
 
                 if self.print_debug_info:
@@ -444,11 +492,19 @@ class BTCDescManager:
 
                 useful_proj_num += 1
                 temp_binary_list = self.extract_binary_from_plane(proj_center, proj_normal, input_cloud)
+
+                print(f"[DEBUG] Plane {i} produced {len(temp_binary_list)} binary descriptors")
                 binary_list.extend(temp_binary_list)
 
                 # C++ logic: stop when we have enough projection planes
                 if useful_proj_num >= self.config_setting.proj_plane_num:
+                    print(f"[DEBUG] Reached proj_plane_num limit: {self.config_setting.proj_plane_num}")
                     break
+            else:
+                print(f"[DEBUG] Plane {i} skipped due to normal filtering")
+
+        print(f"[DEBUG] Total useful_proj_num: {useful_proj_num}")
+        print(f"[DEBUG] Total binary descriptors before NMS: {len(binary_list)}")
 
         # Non-maximum suppression
         binary_list = self.non_max_suppression(binary_list)
@@ -458,17 +514,27 @@ class BTCDescManager:
             binary_list.sort(key=lambda x: x.summary, reverse=True)
             binary_list = binary_list[:self.config_setting.useful_corner_num]
 
+        print(f"[DEBUG] Final binary descriptors: {len(binary_list)}")
         return binary_list
 
     def extract_binary_from_plane(self, proj_center: np.ndarray, proj_normal: np.ndarray,
                                   input_cloud: np.ndarray) -> List[BinaryDescriptor]:
-        """Extract binary descriptors from a single projection plane with FIXED coordinate system"""
+        """Extract binary descriptors from a single projection plane with detailed debugging"""
+
+        print(f"[DEBUG] extract_binary_from_plane called")
+        print(f"[DEBUG] proj_center: {proj_center}")
+        print(f"[DEBUG] proj_normal: {proj_normal}")
+        print(f"[DEBUG] input_cloud size: {len(input_cloud)}")
+
         resolution = self.config_setting.proj_image_resolution
         dis_threshold_min = self.config_setting.proj_dis_min
         dis_threshold_max = self.config_setting.proj_dis_max
         high_inc = self.config_setting.proj_image_high_inc
         summary_min_thre = self.config_setting.summary_min_thre
         line_filter_enable = self.config_setting.line_filter_enable
+
+        print(f"[DEBUG] Parameters: resolution={resolution}, dis_range=[{dis_threshold_min}, {dis_threshold_max}]")
+        print(f"[DEBUG] summary_min_thre={summary_min_thre}, line_filter={line_filter_enable}")
 
         A, B, C = proj_normal
         D = -np.dot(proj_normal, proj_center)
@@ -509,11 +575,15 @@ class BTCDescManager:
         dis_list = []
 
         debug_count = 0
+        points_in_range = 0
+
         for point in input_cloud:
             x, y, z = point[:3]
             dis = x * A + y * B + z * C + D
 
             if dis_threshold_min < dis <= dis_threshold_max:
+                points_in_range += 1
+
                 # FIXED: Project point onto plane using exact C++ method
                 cur_project = np.zeros(3)
                 cur_project[0] = (-A * (B * y + C * z + D) + x * (B * B + C * C)) / (A * A + B * B + C * C)
@@ -533,7 +603,10 @@ class BTCDescManager:
                           f"dis={dis:.3f} -> 2D({project_x:.3f}, {project_y:.3f})")
                 debug_count += 1
 
+        print(f"[DEBUG] Points in distance range: {points_in_range}/{len(input_cloud)}")
+
         if len(point_list_2d) <= 5:
+            print(f"[DEBUG] Too few points for projection: {len(point_list_2d)}")
             return []
 
         point_list_2d = np.array(point_list_2d)
@@ -579,19 +652,19 @@ class BTCDescManager:
                 dis_containers[x_index][y_index].append(dis_list[i])
                 valid_grid_count += 1
 
-        # DEBUG: 网格填充统计
-        if self.print_debug_info:
-            print(f"[DEBUG] Grid filling:")
-            print(f"  Valid grid assignments: {valid_grid_count}/{len(point_list_2d)}")
-            print(f"  Non-empty grids: {np.sum(img_count > 0)}")
+        print(f"[DEBUG] Valid grid assignments: {valid_grid_count}/{len(point_list_2d)}")
+        non_empty_grids = np.sum(img_count > 0)
+        print(f"[DEBUG] Non-empty grids: {non_empty_grids}")
 
         # Calculate occupancy arrays
         cut_num = int((dis_threshold_max - dis_threshold_min) / high_inc)
         binary_containers = {}
 
+        grids_with_data = 0
         for x in range(x_axis_len):
             for y in range(y_axis_len):
                 if img_count[x, y] > 0:
+                    grids_with_data += 1
                     occupy_list = [False] * cut_num
                     cnt_list = [0] * cut_num
 
@@ -612,6 +685,8 @@ class BTCDescManager:
                         summary=int(segment_dis),
                         location=np.zeros(3)  # Will be set later
                     )
+
+        print(f"[DEBUG] Grids with occupancy data: {grids_with_data}")
 
         # Extract maximum points in each segment
         binary_list = []
@@ -661,6 +736,7 @@ class BTCDescManager:
             print(f"  segment_accepted: {segment_accepted}")
             print(f"  line_filter_enable: {line_filter_enable}")
 
+        print(f"[DEBUG] extract_binary_from_plane returning {len(binary_list)} descriptors")
         return binary_list
 
     def _is_line_point_fixed(self, dis_array: np.ndarray, x: int, y: int, max_dis: float, x_axis_len: int,
@@ -819,37 +895,43 @@ class BTCDescManager:
         # Step 1: Voxelization and plane detection
         voxel_map = self.init_voxel_map(input_cloud)
 
-        # Step 2: Get plane cloud
-        plane_points = self.get_planes_from_voxel_map(voxel_map)
-        self.plane_cloud_vec.append(np.array(plane_points))
+        # Step 2: Get original planes for storage (matching C++ behavior)
+        original_plane_points = self.get_planes_from_voxel_map(voxel_map)
+        self.plane_cloud_vec.append(np.array(original_plane_points))
 
-        if self.print_debug_info:
-            print(f"[Description] planes size: {len(plane_points)}")
-
-        # Step 3: Extract binary descriptors with FIXED projection plane selection
+        # Step 3: Get projection planes and merge them
         proj_planes = self.get_projection_planes(voxel_map)
 
+        if self.print_debug_info:
+            print(f"[DEBUG] Original planes count: {len(original_plane_points)}")
+            print(f"[DEBUG] Merged planes count: {len(proj_planes)}")
+            print(f"[Description] planes size: {len(original_plane_points)}")  # 保持与C++一致的输出
+
+        # Handle case when no valid planes found
         if not proj_planes:
             # Create default projection plane if no planes found
             default_plane = Plane(
                 center=np.array([input_cloud[0, 0], input_cloud[0, 1], input_cloud[0, 2]]),
                 normal=np.array([0, 0, 1]),
                 covariance=np.eye(3),
-                is_plane=True
+                is_plane=True,
+                points_size=1,
+                sub_plane_num=0
             )
             proj_planes = [default_plane]
         else:
             # C++ logic: sort by points_size in descending order
             proj_planes.sort(key=lambda x: x.points_size, reverse=True)
 
-        # FIXED: Use exact C++ binary extraction logic
+        # Step 4: Extract binary descriptors using merged planes
         binary_list = self.extract_binary_descriptors(proj_planes, input_cloud)
+        # binary_list = self.extract_binary_descriptors_debug_override(proj_planes, input_cloud)
         self.history_binary_list.append(binary_list)
 
         if self.print_debug_info:
             print(f"[Description] binary size: {len(binary_list)}")
 
-        # Step 4: Generate BTC descriptors
+        # Step 5: Generate BTC descriptors
         btc_list = self.generate_btc_descriptors(binary_list, frame_id)
 
         if self.print_debug_info:
